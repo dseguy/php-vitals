@@ -13,9 +13,9 @@ A userland component providing a uniform **build / parse / validate** API for ev
 | Type            | library                                                                   |
 | License         | MIT                                                                       |
 | PHP requirement | >= 8.2                                                                    |
-| Dependencies    | none required; suggests `ext-intl`, `ext-yaml`,       |
+| Dependencies    | none required; suggests `ext-intl`, `ext-mbstring`, `ext-iconv`, which are core PHP ext       |
 | Autoload        | PSR-4 `Vitals\\` → `src/`                                                 |
-| CI              | GitHub Actions: matrix 8.2–8.4, PHPUnit + static analysis (Psalm/PHPStan/Mago) |
+| CI              | GitHub Actions: matrix 8.2–8.6, PHPUnit + static analysis (Mago) |
 
 
 ## 3. Core API model
@@ -35,7 +35,7 @@ interface Parser {
 
 interface Validator {
     public function validate(string $input): bool;
-    public function get_last_error(): ?string;
+    public function check(string $input): ?Violation;
 }
 ```
 
@@ -43,14 +43,15 @@ Conventions:
 
 - **Structured representation is an array**, not a format-specific object. This allows round-trip pipelines (`parse(build(parse($x))) === parse($x)`) and easy JSON export of any format's state.
 - **Strictness is explicit**: every class takes a `Flags` bitmask or enum values in its constructor; default is the strictest sane mode.
-- **Immutable objects**: created validation objects are immutable.
-- **Input Limits**: set maximum input limits by default, lifted by explicit configuration. For example, nested 
+- **Immutable objects**: created validation and format objects are immutable.
+- **Input Limits**: set maximum input limits by default, lifted by explicit configuration. For example, nested arrays should stop after 10 dimensions.
 - **Encoding**: encoding is UTF-8. 
 - **Errors**: `parse()` throws `Vitals\Exception\FormatException` on malformed input and never returns partial arrays silently; `validate()` never throws on malformed input; `build()` throws `Vitals\BuildException` on impossible representations, such as URL port > 65535.
 - **Delegation over duplication**: when a native function exists and behaves correctly, the class wraps it (e.g. JSON trio) and only adds the missing piece.
-- **Round-trip guarantee**: `build(parse($s))` should produce a semantically equal string; property-test this in CI. `build(parse($s)) == $s` byte-equal where the format is canonical, semantic-equality otherwise. The impossible round trips should be documented, and possible round trips should be constructed if possible.  
+- **Round-trip guarantee**: `parse(build(parse($s)))` should produce a semantically equal parsed string; property-test this in CI. `build(parse($s)) == $s` byte-equal where the format is canonical, semantic-equality otherwise. The impossible round trips should be documented, and possible round trips should be constructed if possible.  
 - **Configuration**: when needed, directives are passed at the constructor call. They should get a default value as much as possible. 
 - **Warnings**: native PHP warnings are catch with a scoped error handler, and turned into exceptions. No usage of `@`
+- **Missing ext-intl**: run a reduced mode.
 
 ## 4. Class catalog & phases
 
@@ -59,13 +60,12 @@ Conventions:
 
 | Class                 | Wraps / implements                                                      | Notes                                                                                                                           |
 | --------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `Format\Url`          | parse: `parse_url()` (fixed for partial failures); build + validate new | RFC 3986 validation incl. port range, IDN via `ext-intl` optional                                             |
-| `Format\Dsn`          | nothing native                                                          | Grammar: `scheme:key=value;...` with driver-specific option maps (pdo-mysql, pdo-pgsql, mongodb, redis, amqp, smtp)             |
-| `Format\Ini`          | parse: `parse_ini_string(INI_SCANNER_RAW)`; build new                   | `ini_emit()`-equivalent, section-aware, with configuration for build()                                                                                  |
+| `Format\Url`          | parse: `parse_url()` (fixed for partial failures); build + validate new | RFC 3986 validation by default incl. port range, IDN via `ext-intl` optional. Using constructor to choose WhatWG, or parse_url on older versions.                                        |
+| `Format\Ini`          | parse: `parse_ini_string(INI_SCANNER_RAW)`; build new                   | `ini_emit()`-equivalent, section-aware, with configuration for build(), to configure true, null and key[] writing (one each)                                                                                  |
 | `Format\QueryString`  | `http_build_query()` / Rebuild `parse_str()` to validate                         | normalizes `[]` array keys.                                                                                                       |
-| `Format\ByteSize`     | `ini_parse_quantity()` polyfill + build                                 | `128M` <-> int bytes. Multiplier is 1024. No garbage with warning.                                                                                                            |
-| `Format\Serialize`    | `serialize()`; new `validate()`                                         | unserialize() is never called on untrusted input, set nesting-depth and length limits, and say how objects and references map into the array.     |
-| `Format\Pattern\Pcre` | new validate (compile without match) + simple AST                       | `preg_match($p, '')` : for example `/^(?:$p)$/` on empty subject with error capture?                                            |
+| `Format\ByteSize`     | `ini_parse_quantity()`                                | `128M` <-> int bytes. Multiplier is 1024. No garbage with warning.                                                                                                            |
+| `Format\Serialize`    | `serialize()`; new `validate()`                                         | unserialize() is never called on untrusted input, set nesting-depth and length limits. References are not supported.     |
+| `Format\Pattern\Pcre` | new validate (compile without match) + simple AST                       | `preg_match($p, '')` : for example `/^(?:$p)$/` on empty subject with error capture                                            |
 
 
 ### Phase 2 — date & numeric
@@ -73,11 +73,11 @@ Conventions:
 
 | Class                     | Notes                                                                                              |
 | ------------------------- | -------------------------------------------------------------------------------------------------- |
-| `Format\DateSpec`         | validate a `date()` format string, like for DateTime                     |
+| `Format\DateSpec`         | validate a `date()` format string. Use DateTime::format() token docs                     |
 | `Format\DateIntervalSpec` | ISO-8601 duration `P1Y2M...` build/parse/validate (constructor wraps)                              |
-| `Format\SprintfSpec`      | validate conversion specifiers; safe `sprintf` with positional-arg awareness                       |
+| `Format\SprintfSpec`      | validate conversion specifiers;                      |
 | `Format\Numeric`          | numeric-string lint (PHP 8 rules, leading whitespace, `NAN`/`INF`)                                 |
-| `Format\Locale`           | wraps intl `Locale::composeLocale`/`parseLocale` when available; pure-PHP fallback |
+| `Format\Locale`           | wraps intl `Locale::composeLocale`/`parseLocale` when available; use BCP 47 or ICU, depending on configuration (default to BCP 47) |
 
 
 ### Phase 3 — encodings & markup
@@ -91,15 +91,188 @@ Conventions:
 | `Format\Glob`         | glob pattern builder (escapes meta chars). Omit GLOB_BRACE option                   |
 
 
-## 5. Package layout
+## 5. Parsed data shapes
+
+The array returned by `parse()` and accepted by `build()`, per format, in array-shape notation.
+
+Common rules:
+
+- **Keys are always present** in `parse()` output. An absent component is `null`, a present-but-empty one is `''` (or `[]`), so both survive a round trip.
+- **`build()` accepts missing keys** and treats them as `null`. Unknown keys throw `BuildException`.
+- **Values are scalars, `null`, or arrays** of the same: no objects, so any shape can be exported to JSON.
+- **Values are decoded**: escaping and percent-encoding belong to the string form, not to the array.
+
+### Phase 1
+
+#### `Format\Url`
+
+```php
+array{
+    scheme:   ?string,  // lowercased, without ':'
+    user:     ?string,
+    pass:     ?string,
+    host:     ?string,  // IPv6 literal kept with its brackets
+    port:     ?int,     // 0–65535
+    path:     string,   // always present, '' when empty
+    query:    ?string,  // raw, without '?'; feed it to Format\QueryString
+    fragment: ?string,  // without '#'
+}
+```
+
+Same keys as `parse_url()`, in the three modes (RFC 3986, WhatWG, `parse_url`).
+
+#### `Format\Ini`
+
+```php
+array{
+    global:   array<string, IniValue>,                 // directives before the first section
+    sections: array<string, array<string, IniValue>>,  // section name => directives, in file order
+}
+
+// IniValue
+string | array<int|string, string>   // key[] = v  and  key[name] = v
+```
+
+`parse()` only yields strings (`INI_SCANNER_RAW`). `build()` also accepts `bool`, `null`, `int` and `float` as values, written according to the constructor configuration.
+
+`global` and `sections` are separate keys because the native merged array cannot tell a section from a `key[]` directive of the same name.
+
+#### `Format\QueryString`
+
+```php
+array<string, QueryValue>
+
+// QueryValue
+string | array<int|string, QueryValue>
+```
+
+Keys are the decoded parameter names, in order of appearance. `a[]=1&a[]=2` yields `['a' => ['1', '2']]`; `a[b]=1` yields `['a' => ['b' => '1']]`. A parameter without `=` has the value `''`. Nesting stops at the input limit.
+
+#### `Format\ByteSize`
+
+```php
+array{
+    bytes: int,               // value * multiplier(unit)
+    value: int,               // number as written
+    unit:  ''|'K'|'M'|'G',    // uppercased; '' for plain bytes
+}
+```
+
+`build()` uses `value` and `unit`; when only `bytes` is given, it emits the largest unit that divides it exactly. `bytes` conflicting with `value` and `unit` throws `BuildException`.
+
+#### `Format\Serialize`
+
+A tree of nodes, each tagged by `type`:
+
+```php
+// SerializeNode
+array{type: 'null'}
+| array{type: 'bool',   value: bool}
+| array{type: 'int',    value: int}
+| array{type: 'float',  value: float}
+| array{type: 'string', value: string}
+| array{type: 'array',  items: list<array{key: int|string, value: SerializeNode}>}
+| array{type: 'object', class: string, properties: list<array{
+      name:       string,                          // without the \0 mangling
+      visibility: 'public'|'protected'|'private',
+      value:      SerializeNode,
+  }>}
+| array{type: 'custom', class: string, data: string}   // C: Serializable payload, kept opaque
+| array{type: 'enum',   class: string, case: string}   // E:
+```
+
+`items` and `properties` are lists of pairs, not maps, to keep the original order and the int/string distinction of keys. `R:` and `r:` references throw `FormatException`.
+
+#### `Format\Pattern\Pcre`
+
+```php
+array{
+    delimiter: string,     // opening delimiter; the closing one is derived: ( ) [ ] { } < >
+    pattern:   string,     // between the delimiters, verbatim
+    modifiers: string,     // e.g. 'iu', in order of appearance
+    ast:       PcreNode,   // derived from pattern; ignored by build()
+}
+
+// PcreNode
+array{
+    type:     'sequence'|'alternation'|'group'|'quantifier'|'class'
+            | 'literal'|'escape'|'anchor'|'dot'|'backreference',
+    value:    ?string,          // source text of leaf nodes
+    children: list<PcreNode>,   // [] for leaf nodes
+    name:     ?string,          // group: capture name
+    capture:  ?bool,            // group: false for (?:...), lookarounds, etc.
+    min:      ?int,             // quantifier
+    max:      ?int,             // quantifier: null when unbounded
+    negated:  ?bool,            // class: [^...]
+}
+```
+
+### Phase 2
+
+#### `Format\DateIntervalSpec`
+
+```php
+array{
+    years: int, months: int, weeks: int, days: int,
+    hours: int, minutes: int, seconds: int,
+}
+```
+
+All values are `>= 0`; a component missing from the string is `0`.
+
+#### `Format\Locale`
+
+```php
+array{
+    language:   string,
+    script:     ?string,
+    region:     ?string,
+    variants:   list<string>,
+    extensions: array<string, string>,   // singleton => value, e.g. ['u' => 'ca-gregory']
+    private:    list<string>,            // subtags after 'x'
+}
+```
+
+Same shape for BCP 47 and ICU; the configuration only changes the string form.
+
+### Phase 3
+
+#### `Format\LdapDn`
+
+```php
+list<                      // RDNs, left to right
+    list<array{            // one entry per attribute; more than one for multi-valued RDNs (a=1+b=2)
+        type:  string,     // attribute name or OID
+        value: string,     // unescaped; hex digits when hex is true
+        hex:   bool,       // true for '#'-prefixed values
+    }>
+>
+```
+
+#### `Format\StreamUri`
+
+```php
+array{
+    read:     list<string>,   // read=a|b
+    write:    list<string>,   // write=a|b
+    both:     list<string>,   // filters given without read= or write=
+    resource: string,         // after resource=, verbatim
+}
+```
+
+### Formats without a parsed shape
+
+`Format\DateSpec`, `Format\SprintfSpec`, `Format\Numeric` and `Format\Charset` only validate. `Format\Glob` only builds, from a `list<array{literal: string} | array{pattern: string}>`: `literal` segments are escaped, `pattern` segments are emitted verbatim.
+
+## 6. Package layout
 
 This is the list for phase 1. More later. 
 
 ```
 src/
-  Exception/FormatException.php // extends ValueError
-  Exception/BuildException.php
-  Exception/VitalsException.php // interface
+  Exception/FormatException.php // extends UnexpectedValueException
+  Exception/BuildException.php  // extends InvalidArgumentException
+  Exception/VitalsException.php // interface for both exceptions
   Builder.php  Parser.php  Validator.php
   Format/
     Url.php  Dsn.php  Ini.php  QueryString.php
@@ -111,16 +284,17 @@ tests/
 
 
 
-## 6. Testing strategy
+## 7. Testing strategy
 
 1. **Unit tests** per format against curated valid/invalid fixture corpora.
-2. **Round-trip property tests**: `parse(build($x)) == $x` for generated `$x`; byte-equality when format is canonical (DSN, query string with sorted keys).
+2. **Round-trip property tests**: `parse(build(parse($x))) == parse($x)` for generated `$x`; byte-equality when format is canonical.
 3. **Differential tests vs native**: when wrapping native functions, assert same outputs on corpus, and document *intentional* divergences (e.g. `parse_url()` quirk fixes).
 4. **Fuzzing** (optional phase 2): malformed inputs never throw anything but `FormatException`.
 
-## 7. Non-goals
+## 8. Non-goals
 
 - No HTML/XML parser.
+- No DSN handling ATM.
 - No SQL building (query builders exist).
 - No gettext/ICU message catalogs (belongs to intl wrappers ecosystem).
 - No function helpers (RFU)
