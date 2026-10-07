@@ -96,7 +96,7 @@ Conventions:
 | --------------------- | --------------------------------------------------------------------- |
 | `Format\Charset`      | name validation against `mb_list_encodings()`/iconv (configuration, default to mb_string)                   |
 | `Format\LdapDn`       | build/parse with full `\,+"><;` escaping. RFC 4514, including a leading #, leading and trailing spaces, and \XX hex escapes. |
-| `Format\StreamUri`    | `php://filter/read=<filters>/resource=...` build/parse                |
+| `Format\StreamUri`    | build/parse/validate PHP stream wrapper URIs: `php://*`, `data:`, `compress.zlib://`, `compress.bzip2://`, `zip://`, `phar://`, `glob://`. URL-shaped wrappers are delegated to `Format\Url`. Validation allowlists wrappers and filters (security). `php://*` and `data:` first; archive wrappers may follow in a later release |
 | `Format\Glob`         | glob pattern builder (escapes meta chars, depending on platform). Omit GLOB_BRACE option. Throw an exception for `*`, as Windows literal                   |
 
 
@@ -275,14 +275,49 @@ list<                      // RDNs, left to right
 
 #### `Format\StreamUri`
 
+A tagged union on `wrapper`:
+
 ```php
-array{
-    read:     list<string>,   // read=a|b
-    write:    list<string>,   // write=a|b
-    both:     list<string>,   // filters given without read= or write=
-    resource: string,         // after resource=, verbatim
-}
+// php://
+  array{wrapper: 'php', target: 'stdin'|'stdout'|'stderr'|'input'|'output'|'memory'}
+| array{wrapper: 'php', target: 'fd',     fd: int}                    // php://fd/3
+| array{wrapper: 'php', target: 'temp',   maxMemory: ?int}            // php://temp/maxmemory:1048576, in bytes
+| array{wrapper: 'php', target: 'filter',
+      read:     list<string>,   // read=a|b
+      write:    list<string>,   // write=a|b
+      both:     list<string>,   // filters given without read= or write=
+      resource: string,         // after resource=, verbatim
+  }
+
+// data: (RFC 2397), with or without '//'
+| array{wrapper: 'data', mediaType: string, parameters: array<string, string>, base64: bool, data: string}
+
+// compression and archives
+| array{wrapper: 'compress.zlib'|'compress.bzip2', resource: string}  // compress.zlib://file.gz
+| array{wrapper: 'zip',  archive: string, entry: ?string}             // zip://archive.zip#dir/entry.txt
+| array{wrapper: 'phar', archive: string, path: string}               // phar://app.phar/src/x.php
+| array{wrapper: 'glob', pattern: string}                             // glob://*.txt; pattern follows Format\Glob
+
+// any other wrapper: extension ones (ssh2.*, rar, expect…) or registered with stream_wrapper_register()
+| array{wrapper: string, target: string}                              // target kept opaque
 ```
+
+Rules:
+
+- **URL-shaped wrappers** (`file://`, `http(s)://`, `ftp(s)://`) are not parsed here: use `Format\Url`. `StreamUri` still validates them against the wrapper allowlist.
+- **Nesting**: `resource`, `archive` and `pattern` are plain strings. A nested stream URI, such as `php://filter/read=string.rot13/resource=compress.zlib://phar://a.phar/x.gz`, is parsed by calling `parse()` again on that string. Validation follows the whole chain, within the nesting-depth limit.
+- **Filter names** are URL-decoded, as PHP does.
+- **phar split**: `archive` ends at the first path segment containing `.phar`. Archives whose name has no `.phar` (aliases) can't be split, and are documented as a known limitation.
+- **`data:` payload**: `data` is the payload as written (still base64 when `base64` is true); decoding is left to the caller.
+
+Validation configuration (constructor), because `php://filter` chains and `phar://` are common attack vectors (file inclusion turned into code execution, deserialization of phar metadata):
+
+| Directive          | Default                                   |
+| ------------------ | ----------------------------------------- |
+| allowed wrappers   | `file` only (plain paths and `file://`)   |
+| allowed filters    | none; upper bound is `stream_get_filters()` |
+| max filter chain   | 5 filters                                 |
+| max nesting depth  | 3 wrappers                                |
 
 ### Formats without a parsed shape
 
