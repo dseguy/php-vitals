@@ -54,14 +54,14 @@ final readonly class Violation {
 Conventions:
 
 - **Structured representation is an array**, not a format-specific object. This allows round-trip pipelines (`parse(build(parse($x))) == parse($x)`).
-- **Strictness is explicit**: every class takes a `Flags` enum values in its constructor; default is the strictest sane mode.
+- **Strictness is explicit**: every class takes `Flags` values in its constructor (see 3.2); default is the strictest sane mode.
 - **Immutable objects**: created validation and format objects are immutable.
 - **Input Limits**: set maximum input limits by default, lifted by explicit configuration. Default: nesting depth: 10; Input length: 1Mb; items (parameter, array entries): max_input_vars or 1000 is not available.
 - **Encoding**: encoding is UTF-8, except for binary payloads. 
 - **Errors**: `parse()` throws `Vitals\Exception\FormatException` on malformed input and never returns partial arrays silently; `validate()` never throws on malformed input; `build()` throws `Vitals\Exception\BuildException` on impossible representations, such as URL port > 65535.
 - **Delegation over duplication**: when a native function exists and behaves correctly, the class wraps it (e.g. JSON trio) and only adds the missing piece.
 - **Round-trip guarantee**: `parse(build(parse($s)))` must produce an equal parsed string; property-test this in CI. `build(parse($s)) == $s` byte-equal where the format is canonical, semantic-equality otherwise. The impossible round trips should be documented, and possible round trips should be constructed if possible.  
-- **Configuration**: when needed, directives are passed at the constructor call. They should get a default value as much as possible. 
+- **Configuration**: when needed, directives are passed at the constructor call, as `Flags` values (see 3.2). They should get a default value as much as possible. 
 - **Warnings**: native PHP warnings are caught with a scoped error handler, and turned into exceptions. No usage of `@`. validate() and check() turn those exceptions into a false result or a Violation.
 - **Missing ext-intl**: throw an exception, that is not supported.
 
@@ -117,6 +117,7 @@ Rules:
 | `url.invalid_path`             | path not allowed in this position (e.g. `//` without authority) |
 | `url.invalid_character`        | character not allowed in this component                      |
 | `url.invalid_percent_encoding` | `%` not followed by two hex digits                           |
+| `url.disallowed_scheme`        | scheme not in `AllowedSchemes`                               |
 
 **`ini`**
 
@@ -167,6 +168,7 @@ Rules:
 | `serialize.invalid_property_name` | malformed `\0` mangling                                   |
 | `serialize.invalid_enum`          | malformed `E:` payload (missing `Class:Case`)            |
 | `serialize.reference_unsupported` | `r:` or `R:` found                                        |
+| `serialize.disallowed_class`      | object, custom or enum not allowed by `NoObjects` or `AllowedClasses` |
 
 **`pcre`**
 
@@ -219,6 +221,7 @@ Rules:
 | `numeric.invalid_exponent`  | `e` without digits                                      |
 | `numeric.non_finite`        | `NAN`, `INF`: not numeric strings in PHP               |
 | `numeric.int_overflow`      | integer string that would become a float (strict mode only) |
+| `numeric.not_integer`       | decimal point or exponent with `IntegerOnly`           |
 
 **`locale`**
 
@@ -266,6 +269,85 @@ Rules:
 | `stream.invalid_data_uri`   | `data:` without `,`, or malformed media type or parameter    |
 | `stream.invalid_base64`     | `;base64` payload is not valid base64                        |
 | `stream.phar_archive_not_found` | no path segment containing `.phar`                       |
+
+### 3.2 Flags and options
+
+`Flags` is an interface. Everything passed to a constructor implements it:
+
+- **Flags**: cases of a per-format enum (`UrlFlag`, `IniFlag`, …), for switches and choices. Defaults are the strictest sane mode, so most flags relax a rule (`Allow…`) or pick an alternative.
+- **Options**: small readonly value objects, for settings that carry a value (`new MaxDepth(20)`, `new AllowedWrappers('file', 'php')`).
+
+```php
+interface Flags {}
+
+enum IniFlag implements Flags { case AllowDuplicateKeys; case AllowDuplicateSections; /* … */ }
+
+final readonly class MaxDepth implements Flags {
+    public function __construct(public int $depth) {}
+}
+
+$ini = new Format\Ini(IniFlag::AllowDuplicateKeys, new MaxDepth(20));
+```
+
+Rules:
+
+- A flag or option the class does not support throws `\InvalidArgumentException` at construction, so a `UrlFlag` given to `Ini` never goes unnoticed.
+- Flags of the same **group** are mutually exclusive: giving two of them throws `\InvalidArgumentException`. Groups are marked below; the default is in **bold**.
+- Giving the same option twice throws `\InvalidArgumentException`.
+- A flag that needs a missing extension (e.g. `UrlFlag::Idn` without `ext-intl`) throws at construction.
+- New flags and options may be added in minor versions.
+
+#### Common options (every format)
+
+| Option              | Default                                        | Violation code           |
+| ------------------- | ---------------------------------------------- | ------------------------ |
+| `MaxDepth(int)`     | 10                                             | `common.too_deep`        |
+| `MaxLength(int)`    | 1 MiB                                          | `common.input_too_long`  |
+| `MaxItems(int)`     | `max_input_vars`, or 1000 when not available   | `common.too_many_items`  |
+
+#### Phase 1
+
+| Format        | Flag / option                                                         | Effect                                                                 |
+| ------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `Url`         | group: **`Rfc3986`**, `WhatWg`, `ParseUrl`                            | parsing mode; `WhatWg` throws before PHP 8.5; `ParseUrl` keeps `parse_url()` behaviour |
+|               | `AllowRelative`                                                       | accept relative references; default requires a scheme (`url.missing_scheme`) |
+|               | `Idn`                                                                 | accept non-ASCII hosts and convert them with `idn_to_ascii()`; needs `ext-intl` |
+|               | `AllowedSchemes(string ...)`                                          | `validate()` only; default: any scheme (`url.disallowed_scheme`)       |
+| `Ini`         | `AllowDuplicateKeys`, `AllowDuplicateSections`                        | last one wins instead of `ini.duplicate_key` / `ini.duplicate_section` |
+|               | group, `build()` booleans: **`BoolTrueFalse`**, `BoolOnOff`, `BoolYesNo`, `BoolOneZero` | how `true` / `false` are written                  |
+|               | group, `build()` null: **`NullEmpty`**, `NullWord`                    | `key =` or `key = null`                                                |
+|               | group, `build()` arrays: **`ArrayAppend`**, `ArrayIndexed`            | `key[] = v` or `key[0] = v`                                            |
+|               | group, `build()` quoting: **`QuoteWhenNeeded`**, `QuoteAlways`        | quoting of string values                                               |
+| `QueryString` | group, `build()` spaces: **`Rfc3986`**, `Rfc1738`                     | `%20` or `+`                                                           |
+|               | `PreserveKeyNames`                                                    | keep `.` and spaces in keys instead of PHP's `_` conversion; makes the round trip possible |
+| `ByteSize`    | `AllowWhitespace`                                                     | accept leading and trailing whitespace                                 |
+| `Serialize`   | `NoObjects`                                                           | reject `O:`, `C:` and `E:` (`serialize.disallowed_class`)              |
+|               | `AllowedClasses(string ...)`                                          | reject other classes (`serialize.disallowed_class`); default: any class |
+| `Pcre`        | `BodyOnly`                                                            | input is the pattern body, without delimiters or modifiers             |
+
+#### Phase 2
+
+| Format             | Flag / option                       | Effect                                                         |
+| ------------------ | ----------------------------------- | -------------------------------------------------------------- |
+| `DateSpec`         | `AllowLiteralLetters`               | no `date.unescaped_letter`                                     |
+| `DateIntervalSpec` | none                                |                                                                |
+| `SprintfSpec`      | `ArgumentCount(int)`                | enables `sprintf.argument_count_mismatch`; default: not checked |
+| `Numeric`          | `AllowWhitespace`                   | no `numeric.whitespace`                                        |
+|                    | `AllowIntOverflow`                  | no `numeric.int_overflow`                                      |
+|                    | `IntegerOnly`                       | reject decimals and exponents (`numeric.not_integer`)          |
+| `Locale`           | none                                |                                                                |
+
+#### Phase 3
+
+| Format      | Flag / option                                   | Effect                                                         |
+| ----------- | ----------------------------------------------- | -------------------------------------------------------------- |
+| `Charset`   | group: **`Mbstring`**, `Iconv`                  | backend used for name validation                               |
+| `LdapDn`    | `AllowLegacySyntax`                             | accept RFC 1779 / 2253 forms: spaces around `=` and `,`, `;` as separator |
+| `StreamUri` | `AllowedWrappers(string ...)`                   | default: `file` only (`stream.disallowed_wrapper`)             |
+|             | `AllowedFilters(string ...)`                    | default: none (`stream.disallowed_filter`)                     |
+|             | `MaxFilterChain(int)`                           | default: 5 (`stream.filter_chain_too_long`)                    |
+|             | `MaxDepth(int)`                                 | default for this format: 3 nested wrappers                     |
+| `Glob`      | group: **`CurrentPlatform`**, `Posix`, `Windows` | escaping rules used by `build()`                              |
 
 ## 4. Class catalog & phases
 
@@ -522,7 +604,9 @@ src/
   Exception/FormatException.php // extends UnexpectedValueException
   Exception/BuildException.php  // extends InvalidArgumentException
   Exception/VitalsException.php // interface for both exceptions
-  Builder.php  Parser.php  Validator.php Violation.php ViolationCode.php
+  Builder.php  Parser.php  Validator.php Violation.php ViolationCode.php Flags.php
+  Flag/        UrlFlag.php IniFlag.php QueryStringFlag.php ByteSizeFlag.php SerializeFlag.php PcreFlag.php
+  Option/      MaxDepth.php MaxLength.php MaxItems.php AllowedSchemes.php AllowedClasses.php
   Format/
     Url.php Ini.php  QueryString.php
     ByteSize.php  Serialize.php  Pattern/Pcre.php
