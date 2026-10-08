@@ -1,4 +1,4 @@
-# vitals — Vital PHP String Format Toolkit (Specification v0.1.2)
+# vitals — Vital PHP String Format Toolkit (Specification v0.2.0)
 
 ## 1. Purpose
 
