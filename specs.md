@@ -24,12 +24,12 @@ Every format is a class implementing one or more of three contracts:
 
 ```php
 interface Builder {
-    /** @param array<string, mixed> $parts structured representation */
+    /** @param array<string|int, mixed> $parts structured representation */
     public function build(array $parts): string;
 }
 
 interface Parser {
-    /** @return array<string, mixed> structured representation */
+    /** @return array<string|int, mixed> structured representation */
     public function parse(string $input): array;
 }
 
@@ -50,11 +50,11 @@ final readonly class Violation {
 
 Conventions:
 
-- **Structured representation is an array**, not a format-specific object. This allows round-trip pipelines (`parse(build(parse($x))) === parse($x)`).
-- **Strictness is explicit**: every class takes a `Flags` bitmask or enum values in its constructor; default is the strictest sane mode.
+- **Structured representation is an array**, not a format-specific object. This allows round-trip pipelines (`parse(build(parse($x))) == parse($x)`).
+- **Strictness is explicit**: every class takes a `Flags` enum values in its constructor; default is the strictest sane mode.
 - **Immutable objects**: created validation and format objects are immutable.
-- **Input Limits**: set maximum input limits by default, lifted by explicit configuration.
-- **Encoding**: encoding is UTF-8. 
+- **Input Limits**: set maximum input limits by default, lifted by explicit configuration. Default at 10.
+- **Encoding**: encoding is UTF-8, except for binary payloads. 
 - **Errors**: `parse()` throws `Vitals\Exception\FormatException` on malformed input and never returns partial arrays silently; `validate()` never throws on malformed input; `build()` throws `Vitals\Exception\BuildException` on impossible representations, such as URL port > 65535.
 - **Delegation over duplication**: when a native function exists and behaves correctly, the class wraps it (e.g. JSON trio) and only adds the missing piece.
 - **Round-trip guarantee**: `parse(build(parse($s)))` must produce a semantically equal parsed string; property-test this in CI. `build(parse($s)) == $s` byte-equal where the format is canonical, semantic-equality otherwise. The impossible round trips should be documented, and possible round trips should be constructed if possible.  
@@ -69,11 +69,11 @@ Conventions:
 
 | Class                 | Wraps / implements                                                      | Notes                                                                                                                           |
 | --------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `Format\Url`          | parse: `parse_url()` (fixed for partial failures); build + validate new | RFC 3986 validation by default incl. port range, IDN via `ext-intl` optional. Using constructor to choose WhatWG. On older versions, RFC 3986 and Whatwg throw exceptions, and parse_url() can be used.                                        |
-| `Format\Ini`          | build new parser.                   | `ini_emit()`-equivalent, section-aware, with configuration for build(), to configure the form of true, null and key[] writing (one configuration for each type)                                                                                  |
+| `Format\Url`          | parse: `parse_url()` (fixed for partial failures); build + validate new | RFC 3986 validation by default incl. port range, IDN via `ext-intl` when available (or throw exception). Using constructor to choose WhatWG. On older versions, RFC 3986 and Whatwg throw exceptions.  Write RFC 3986 parsing in pure PHP for PHP 8.2 to 8.4 versions.                                       |
+| `Format\Ini`          | build own parser.                   | `ini_emit()`-equivalent, section-aware, with configuration for build(), to configure the form of true, null and key[] writing (one configuration for each type)                                                                                  |
 | `Format\QueryString`  | `http_build_query()` / Rebuild `parse_str()` to validate                         | normalizes `[]` array keys.                                                                                                       |
 | `Format\ByteSize`     | `ini_parse_quantity()`                                | `128M` <-> int bytes. Multiplier is 1024.                                                                                                            |
-| `Format\Serialize`    | `serialize()`; new `validate()`                                         | unserialize() is never called on untrusted input, set nesting-depth and length limits. References are not supported.     |
+| `Format\Serialize`    | `serialize()`; new `validate()`                                         | unserialize() is never called on untrusted input, set nesting-depth and length limits. References are not supported. NAN does not support the round trip test.    |
 | `Format\Pattern\Pcre` | new validate (compile without match), No AST.                       | `preg_match($p, '')` under a scoped error handler  |
 
 
@@ -85,7 +85,7 @@ Conventions:
 | `Format\DateSpec`         | validate a `date()` format string. Use DateTime::format() token docs                     |
 | `Format\DateIntervalSpec` | ISO-8601 duration `P1Y2M...` build/parse/validate (constructor wraps)                              |
 | `Format\SprintfSpec`      | validate conversion specifiers;                      |
-| `Format\Numeric`          | numeric-string lint (PHP 8 rules, leading whitespace, `NAN`/`INF`)                                 |
+| `Format\Numeric`          | numeric-string lint (PHP 8 rules, leading and trailing whitespace, `NAN`/`INF`)                                 |
 | `Format\Locale`           | wraps intl `Locale::composeLocale`/`parseLocale` when available; use ICU locale |
 
 
@@ -97,7 +97,7 @@ Conventions:
 | `Format\Charset`      | name validation against `mb_list_encodings()`/iconv (configuration, default to mb_string)                   |
 | `Format\LdapDn`       | build/parse with full `\,+"><;` escaping. RFC 4514, including a leading #, leading and trailing spaces, and \XX hex escapes. |
 | `Format\StreamUri`    | build/parse/validate PHP stream wrapper URIs: `php://*`, `data:`, `compress.zlib://`, `compress.bzip2://`, `zip://`, `phar://`, `glob://`. URL-shaped wrappers are delegated to `Format\Url`. Validation allowlists wrappers and filters (security). `php://*` and `data:` first; archive wrappers may follow in a later release |
-| `Format\Glob`         | glob pattern builder (escapes meta chars, depending on platform). Omit GLOB_BRACE option. Throw an exception for `*`, as Windows literal                   |
+| `Format\Glob`         | glob pattern builder (escapes meta chars, depending on platform). Omit GLOB_BRACE option. n Windows, `build()` throws BuildException when a literal segment contains `*`, `?` or `[`, because Windows has no escape character.    |
 
 
 ## 5. Parsed data shapes
@@ -130,8 +130,6 @@ array{
 
 Same keys as `parse_url()`, in the three modes (RFC 3986, WhatWG, `parse_url`).
 
-`.` and spaces in keys are converted, as per PHP rules. This will not be reversible.
-
 #### `Format\Ini`
 
 ```php
@@ -144,7 +142,7 @@ array{
 string | array<int|string, string>   // key[] = v  and  key[name] = v
 ```
 
-`parse()` only yields strings (`INI_SCANNER_RAW`). `build()` also accepts `bool`, `null`, `int` and `float` as values, written according to the constructor configuration.
+`parse()` only yields strings and uses raw semantics: no type conversion, no `${VAR}` or constant expansion. `build()` also accepts `bool`, `null`, `int` and `float` as values, written according to the constructor configuration.
 
 `global` and `sections` are separate keys because the native merged array cannot tell a section from a `key[]` directive of the same name.
 
@@ -159,9 +157,11 @@ string | array<int|string, QueryValue>
 
 Keys are the decoded parameter names, in order of appearance. `a[]=1&a[]=2` yields `['a' => ['1', '2']]`; `a[b]=1` yields `['a' => ['b' => '1']]`. A parameter without `=` has the value `''`. Nesting throws FormatException at the input limit.
 
-Repeated keys with or without [<index>] are overwriting the previous values: only the last is kept. This means the round trip is not possible.
+Repeated keys without [] are overwriting the previous values: only the last is kept. This means the round trip is not possible.
 
 For build, it uses the RFC 3986 with %20 for spaces, or RFC 1738 with a `+` for space, with constructor configuration.
+
+`.` and spaces in keys are converted, as per PHP rules. This will not be reversible.
 
 #### `Format\ByteSize`
 
@@ -195,7 +195,7 @@ array{type: 'null'}
       name:       string|int,                          // without the \0 mangling
       visibility: 'public'|'protected'|'private',
       value:      SerializeNode,
-      declaringClass: ?string, //`declaringClass` is required for private properties and null,
+      declaringClass: ?string, //`declaringClass` is required for private properties and null otherwise
   }>}
 | array{type: 'custom', class: string, data: string}   // C: Serializable payload, kept opaque
 | array{type: 'enum',   class: string, case: string}   // E:
@@ -212,19 +212,6 @@ array{
     delimiter: string,     // opening delimiter; the closing one is derived: ( ) [ ] { } < >
     pattern:   string,     // between the delimiters, verbatim
     modifiers: string,     // e.g. 'iu', in order of appearance
-}
-
-// PcreNode
-array{
-    type:     'sequence'|'alternation'|'group'|'quantifier'|'class'
-            | 'literal'|'escape'|'anchor'|'dot'|'backreference',
-    value:    ?string,          // source text of leaf nodes
-    children: list<PcreNode>,   // [] for leaf nodes
-    name:     ?string,          // group: capture name
-    capture:  ?bool,            // group: false for (?:...), lookarounds, etc.
-    min:      ?int,             // quantifier
-    max:      ?int,             // quantifier: null when unbounded
-    negated:  ?bool,            // class: [^...]
 }
 ```
 
@@ -252,8 +239,6 @@ array{
     region:     ?string,
     variants:   list<string>,
     keywords: array<string,string>,
-    private:    list<string>,            // subtags after 'x'
-    
 }
 ```
 
@@ -353,7 +338,7 @@ tests/
 ## 8. Non-goals
 
 - No HTML/XML parser.
-- No DSN handling ATM.
+- No DSN handling.
 - No SQL building (query builders exist).
 - No gettext/ICU message catalogs (belongs to intl wrappers ecosystem).
-- No function helpers (RFU)
+- No function helpers.
