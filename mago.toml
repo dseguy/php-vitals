@@ -1,0 +1,14 @@
+php-version = "8.2"
+
+[source]
+paths = ["src", "tests"]
+includes = ["vendor"]
+excludes = ["tests/fixtures"]
+
+[linter.rules]
+# class-level size metrics: a format class holds a whole hand-written parser,
+# and ViolationCode lists every code by design
+cyclomatic-complexity = { enabled = false }
+kan-defect = { enabled = false }
+too-many-methods = { enabled = false }
+too-many-enum-cases = { enabled = false }

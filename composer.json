@@ -1,0 +1,31 @@
+{
+    "name": "dseguy/vitals",
+    "description": "Build, parse and validate PHP's string mini-languages: URL, INI, query string, byte size, serialize, PCRE…",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.2"
+    },
+    "require-dev": {
+        "carthage-software/mago": "^1.53",
+        "phpunit/phpunit": "^11.5"
+    },
+    "suggest": {
+        "ext-intl": "IDN hosts in Format\\Url (UrlFlag::Idn), Format\\Locale",
+        "ext-mbstring": "Format\\Charset",
+        "ext-iconv": "Format\\Charset with the Iconv backend"
+    },
+    "autoload": {
+        "psr-4": {
+            "Vitals\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Vitals\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
