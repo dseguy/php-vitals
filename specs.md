@@ -62,6 +62,208 @@ Conventions:
 - **Warnings**: native PHP warnings are caught with a scoped error handler, and turned into exceptions. No usage of `@`. validate() and check() turn those exceptions into a false result or a Violation.
 - **Missing ext-intl**: throw an exception, that is not supported.
 
+### 3.1 Violation codes
+
+`ViolationCode` is a single string-backed enum shared by all formats. The value is `<format>.<reason>`, the case name is its PascalCase form (`url.port_out_of_range` → `UrlPortOutOfRange`). The value is the stable, public identifier: it is what tests, logs and translations use. `message` is English, may change between versions, and never contains the raw input.
+
+```php
+enum ViolationCode: string {
+    case InputTooLong      = 'common.input_too_long';
+    case UrlPortOutOfRange = 'url.port_out_of_range';
+    // ...
+}
+```
+
+Rules:
+
+- **One code per cause.** When a format-specific code exists, it is used rather than a `common.*` one.
+- **`offset`** points at the first offending byte; it is `null` only where noted.
+- **New codes may be added in minor versions**; removing or renaming one is a major change. Callers must not `match` exhaustively on the enum.
+- `build()` does not use these codes: `BuildException` carries a message only.
+- `Format\Glob` only builds, so it has no codes.
+
+#### Common
+
+| Code                         | Meaning                                                                 |
+| ---------------------------- | ----------------------------------------------------------------------- |
+| `common.empty_input`         | input is empty where the format requires content                       |
+| `common.input_too_long`      | input exceeds the maximum length (`offset` is the limit)               |
+| `common.too_deep`            | nesting exceeds the maximum depth                                       |
+| `common.too_many_items`      | number of entries (parameters, array items, filters…) exceeds the limit |
+| `common.invalid_utf8`        | input is not valid UTF-8, for formats that require it                  |
+| `common.unexpected_character`| character not allowed at this position, no more specific code applies  |
+| `common.unexpected_end`      | input ends in the middle of a construct (truncated)                    |
+| `common.trailing_data`       | valid value followed by extra characters                               |
+| `common.native_error`        | a native function rejected the input with no more specific mapping; `message` carries its text |
+
+#### Phase 1
+
+**`url`**
+
+| Code                           | Meaning                                                      |
+| ------------------------------ | ------------------------------------------------------------ |
+| `url.missing_scheme`           | absolute URL required, no scheme found                       |
+| `url.invalid_scheme`           | scheme does not match `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` |
+| `url.invalid_userinfo`         | forbidden character in user or password                      |
+| `url.invalid_host`             | malformed reg-name host                                      |
+| `url.invalid_ipv4`             | malformed IPv4 address                                       |
+| `url.invalid_ipv6`             | malformed IPv6 literal, or missing `]`                       |
+| `url.invalid_idn`              | IDN host fails conversion to ASCII                           |
+| `url.invalid_port`             | port is not made of digits                                   |
+| `url.port_out_of_range`        | port > 65535                                                 |
+| `url.invalid_path`             | path not allowed in this position (e.g. `//` without authority) |
+| `url.invalid_character`        | character not allowed in this component                      |
+| `url.invalid_percent_encoding` | `%` not followed by two hex digits                           |
+
+**`ini`**
+
+| Code                        | Meaning                                                         |
+| --------------------------- | --------------------------------------------------------------- |
+| `ini.unterminated_section`  | `[section` without closing `]`                                  |
+| `ini.invalid_section_name`  | empty or forbidden characters in a section name                 |
+| `ini.missing_equals`        | directive line without `=`                                      |
+| `ini.invalid_key`           | empty key, or forbidden characters (`?{}\|&~!()^"`)             |
+| `ini.reserved_key`          | key is a reserved word (`null`, `yes`, `no`, `true`, `false`, `on`, `off`, `none`) |
+| `ini.invalid_array_key`     | malformed `key[...]`                                            |
+| `ini.unterminated_quote`    | quoted value without closing `"`                                |
+| `ini.mixed_value_types`     | same key used both as scalar and as `key[]`                     |
+| `ini.duplicate_key`         | key repeated in one section (strict mode only)                  |
+| `ini.duplicate_section`     | section repeated (strict mode only)                             |
+
+**`qs`** (`Format\QueryString`)
+
+| Code                          | Meaning                                         |
+| ----------------------------- | ----------------------------------------------- |
+| `qs.empty_key`                | parameter with an empty name (`=1`)             |
+| `qs.unbalanced_brackets`      | `a[b=1`, `a]=1`                                 |
+| `qs.mixed_value_types`        | same key used both as scalar and as array (`a=1&a[]=2`) |
+| `qs.invalid_percent_encoding` | `%` not followed by two hex digits              |
+
+**`bytesize`**
+
+| Code                     | Meaning                                       |
+| ------------------------ | --------------------------------------------- |
+| `bytesize.invalid_number`| missing or malformed digits                   |
+| `bytesize.invalid_prefix`| `0x`, `0o`, `0b` prefix                       |
+| `bytesize.invalid_unit`  | unit other than `K`, `M`, `G` (any case)      |
+| `bytesize.overflow`      | result exceeds `PHP_INT_MAX` / `PHP_INT_MIN`  |
+
+**`serialize`**
+
+| Code                              | Meaning                                                   |
+| --------------------------------- | --------------------------------------------------------- |
+| `serialize.unknown_type`          | unknown type tag                                          |
+| `serialize.missing_terminator`    | missing `;`, `:` or `}`                                   |
+| `serialize.length_mismatch`       | string length does not match its declared length         |
+| `serialize.count_mismatch`        | array or object item count does not match its declared count |
+| `serialize.invalid_int`           | malformed integer                                         |
+| `serialize.invalid_float`         | malformed float                                           |
+| `serialize.invalid_bool`          | bool other than `0` or `1`                                |
+| `serialize.invalid_key`           | array key is neither int nor string                       |
+| `serialize.invalid_class_name`    | class name is not a valid PHP class name                  |
+| `serialize.invalid_property_name` | malformed `\0` mangling                                   |
+| `serialize.invalid_enum`          | malformed `E:` payload (missing `Class:Case`)            |
+| `serialize.reference_unsupported` | `r:` or `R:` found                                        |
+
+**`pcre`**
+
+| Code                         | Meaning                                                       |
+| ---------------------------- | ------------------------------------------------------------- |
+| `pcre.invalid_delimiter`     | delimiter is alphanumeric, backslash, or whitespace          |
+| `pcre.missing_end_delimiter` | no closing delimiter                                          |
+| `pcre.unknown_modifier`      | modifier not supported by PHP                                 |
+| `pcre.compile_error`         | PCRE rejects the pattern; `message` carries PCRE's text, `offset` is taken from its "at offset N" when present, else `null` |
+
+#### Phase 2
+
+**`date`** (`Format\DateSpec`)
+
+| Code                     | Meaning                                                              |
+| ------------------------ | -------------------------------------------------------------------- |
+| `date.dangling_escape`   | trailing `\` with nothing to escape                                  |
+| `date.unescaped_letter`  | letter that is not a format token, printed literally (strict mode only) |
+
+**`interval`** (`Format\DateIntervalSpec`)
+
+| Code                                | Meaning                                    |
+| ----------------------------------- | ------------------------------------------ |
+| `interval.missing_period`           | does not start with `P`                    |
+| `interval.empty`                    | `P` or `PT` without any component          |
+| `interval.missing_time_designator`  | `H`, `M` or `S` used before `T`            |
+| `interval.unknown_designator`       | designator other than `Y M W D H M S`      |
+| `interval.designator_order`         | components out of order                    |
+| `interval.duplicate_designator`     | same component twice                       |
+| `interval.fraction_unsupported`     | fractional value                           |
+| `interval.negative_unsupported`     | leading `-`                                |
+| `interval.overflow`                 | component exceeds `PHP_INT_MAX`            |
+
+**`sprintf`** (`Format\SprintfSpec`)
+
+| Code                              | Meaning                                                 |
+| --------------------------------- | ------------------------------------------------------- |
+| `sprintf.incomplete_spec`         | `%` at the end of the input                             |
+| `sprintf.unknown_conversion`      | conversion letter not supported by PHP                  |
+| `sprintf.invalid_argnum`          | `%0$`, or argument number beyond the limit             |
+| `sprintf.invalid_padding`         | `'` not followed by a padding character                 |
+| `sprintf.argument_count_mismatch` | needs a different number of arguments than configured (when configured) |
+
+**`numeric`**
+
+| Code                        | Meaning                                                |
+| --------------------------- | ------------------------------------------------------ |
+| `numeric.invalid_character` | character not allowed in a numeric string              |
+| `numeric.whitespace`        | leading or trailing whitespace (strict mode only)      |
+| `numeric.invalid_exponent`  | `e` without digits                                      |
+| `numeric.non_finite`        | `NAN`, `INF`: not numeric strings in PHP               |
+| `numeric.int_overflow`      | integer string that would become a float (strict mode only) |
+
+**`locale`**
+
+| Code                       | Meaning                              |
+| -------------------------- | ------------------------------------ |
+| `locale.invalid_language`  | malformed or missing language        |
+| `locale.invalid_script`    | malformed script subtag              |
+| `locale.invalid_region`    | malformed region subtag              |
+| `locale.invalid_variant`   | malformed variant                    |
+| `locale.duplicate_variant` | same variant twice                   |
+| `locale.invalid_keyword`   | malformed `@key=value`               |
+| `locale.duplicate_keyword` | same keyword twice                   |
+
+#### Phase 3
+
+**`charset`**
+
+| Code                  | Meaning                                                       |
+| --------------------- | ------------------------------------------------------------- |
+| `charset.unknown`     | name unknown to the configured backend (mbstring or iconv)    |
+
+**`ldapdn`**
+
+| Code                             | Meaning                                         |
+| -------------------------------- | ----------------------------------------------- |
+| `ldapdn.empty_rdn`               | empty RDN (`a=1,,b=2`)                          |
+| `ldapdn.missing_equals`          | attribute without `=`                           |
+| `ldapdn.invalid_attribute_type`  | attribute type is neither a name nor an OID     |
+| `ldapdn.invalid_escape`          | `\` not followed by a special character or two hex digits |
+| `ldapdn.unescaped_special`       | special character that must be escaped          |
+| `ldapdn.invalid_hex_value`       | `#` value with odd length or non-hex digits     |
+
+**`stream`** (`Format\StreamUri`)
+
+| Code                        | Meaning                                                      |
+| --------------------------- | ------------------------------------------------------------ |
+| `stream.disallowed_wrapper` | wrapper not in the allowlist                                 |
+| `stream.disallowed_filter`  | filter not in the allowlist                                  |
+| `stream.unknown_filter`     | filter not listed by `stream_get_filters()`                  |
+| `stream.filter_chain_too_long` | more filters than allowed                                 |
+| `stream.unknown_php_target` | `php://` target not in the known list                        |
+| `stream.invalid_fd`         | `php://fd/` without a non-negative integer                   |
+| `stream.invalid_maxmemory`  | malformed `maxmemory:` value                                 |
+| `stream.missing_resource`   | `php://filter` or `compress.*` without a resource            |
+| `stream.invalid_data_uri`   | `data:` without `,`, or malformed media type or parameter    |
+| `stream.invalid_base64`     | `;base64` payload is not valid base64                        |
+| `stream.phar_archive_not_found` | no path segment containing `.phar`                       |
+
 ## 4. Class catalog & phases
 
 ### Phase 1 — high-demand gaps (first release)
