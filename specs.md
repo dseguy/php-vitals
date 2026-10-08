@@ -1,4 +1,4 @@
-# vitals — Vital PHP String Format Toolkit (Specification v0.2.0)
+# vitals — Vital PHP String Format Toolkit (Specification v0.2.1)
 
 ## 1. Purpose
 
@@ -56,11 +56,11 @@ Conventions:
 - **Structured representation is an array**, not a format-specific object. This allows round-trip pipelines (`parse(build(parse($x))) == parse($x)`).
 - **Strictness is explicit**: every class takes `Flags` values in its constructor (see 3.2); default is the strictest sane mode.
 - **Immutable objects**: created validation and format objects are immutable.
-- **Input Limits**: set maximum input limits by default, lifted by explicit configuration. Default: nesting depth: 10; Input length: 1Mb; items (parameter, array entries): max_input_vars or 1000 is not available.
+- **Input Limits**: set maximum input limits by default, lifted by explicit configuration. Default: nesting depth: 10; input length: 1 MiB; items (parameters, array entries): `max_input_vars`, or 1000 if not available (see 3.2).
 - **Encoding**: encoding is UTF-8, except for binary payloads. 
-- **Errors**: `parse()` throws `Vitals\Exception\FormatException` on malformed input and never returns partial arrays silently; `validate()` never throws on malformed input; `build()` throws `Vitals\Exception\BuildException` on impossible representations, such as URL port > 65535.
+- **Errors**: `parse()` throws `Vitals\Exception\FormatException` on malformed input and never returns partial arrays silently; the exception carries the same `Violation` as `check()` in its `public readonly Violation $violation` property; `validate()` never throws on malformed input; `build()` throws `Vitals\Exception\BuildException` on impossible representations, such as URL port > 65535; a constructor throws `Vitals\Exception\ConfigurationException` on invalid flags or options (see 3.2).
 - **Delegation over duplication**: when a native function exists and behaves correctly, the class wraps it (e.g. JSON trio) and only adds the missing piece.
-- **Round-trip guarantee**: `parse(build(parse($s)))` must produce an equal parsed string; property-test this in CI. `build(parse($s)) == $s` byte-equal where the format is canonical, semantic-equality otherwise. The impossible round trips should be documented, and possible round trips should be constructed if possible.  
+- **Round-trip guarantee**: `parse(build(parse($s)))` must be equal (`==`) to `parse($s)`; property-test this in CI. `build(parse($s)) == $s` byte-equal where the format is canonical, semantic-equality otherwise. The impossible round trips should be documented, and possible round trips should be constructed if possible.  
 - **Configuration**: when needed, directives are passed at the constructor call, as `Flags` values (see 3.2). They should get a default value as much as possible. 
 - **Warnings**: native PHP warnings are caught with a scoped error handler, and turned into exceptions. No usage of `@`. validate() and check() turn those exceptions into a false result or a Violation.
 - **Missing ext-intl**: throw an exception, that is not supported.
@@ -291,10 +291,10 @@ $ini = new Format\Ini(IniFlag::AllowDuplicateKeys, new MaxDepth(20));
 
 Rules:
 
-- A flag or option the class does not support throws `\InvalidArgumentException` at construction, so a `UrlFlag` given to `Ini` never goes unnoticed.
-- Flags of the same **group** are mutually exclusive: giving two of them throws `\InvalidArgumentException`. Groups are marked below; the default is in **bold**.
-- Giving the same option twice throws `\InvalidArgumentException`.
-- A flag that needs a missing extension (e.g. `UrlFlag::Idn` without `ext-intl`) throws at construction.
+- A flag or option the class does not support throws `ConfigurationException` at construction, so a `UrlFlag` given to `Ini` never goes unnoticed.
+- Flags of the same **group** are mutually exclusive: giving two of them throws `ConfigurationException`. Groups are marked below; the default is in **bold**.
+- Giving the same option twice throws `ConfigurationException`.
+- A flag that needs a missing extension (e.g. `UrlFlag::Idn` without `ext-intl`) throws `ConfigurationException` at construction.
 - New flags and options may be added in minor versions.
 
 #### Common options (every format)
@@ -356,7 +356,7 @@ Rules:
 
 | Class                 | Wraps / implements                                                      | Notes                                                                                                                           |
 | --------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `Format\Url`          | parse: `parse_url()` (fixed for partial failures); build + validate new | RFC 3986 validation by default incl. port range, IDN via `ext-intl` when available (or throw exception). Using constructor to choose WhatWG. On older versions, Whatwg throw exceptions.  Write RFC 3986 parsing in pure PHP for PHP 8.2 to 8.4 versions.                                       |
+| `Format\Url`          | parse: own RFC 3986 parser, native `Uri\` classes on PHP 8.5+, `parse_url()` in `ParseUrl` mode; build + validate new | RFC 3986 validation by default incl. port range, IDN via `ext-intl` when available (or throw exception). Using constructor to choose WhatWG. On older versions, Whatwg throw exceptions.  Write RFC 3986 parsing in pure PHP for PHP 8.2 to 8.4 versions.                                       |
 | `Format\Ini`          | build own parser.                   | `ini_emit()`-equivalent, section-aware, with configuration for build(), to configure the form of true, null and key[] writing (one configuration for each type)                                                                                  |
 | `Format\QueryString`  | `http_build_query()` / Rebuild `parse_str()` to validate                         | Build produces fully indexed `a[0]=` array keys, like `http_build_query()`.                                                                                                       |
 | `Format\ByteSize`     | `ini_parse_quantity()`                                | `128M` <-> int bytes. Multiplier is 1024.                                                                                                            |
@@ -433,6 +433,8 @@ string | array<int|string, string>   // key[] = v  and  key[name] = v
 
 `global` and `sections` are separate keys because the native merged array cannot tell a section from a `key[]` directive of the same name.
 
+Comments (`;` to the end of the line) and blank lines are dropped by `parse()`, so `build(parse($s))` is not byte-equal when the input has any: this is a documented impossible round trip. `#` comments are rejected (`common.unexpected_character`), as in PHP since 7.0.
+
 #### `Format\QueryString`
 
 ```php
@@ -444,7 +446,7 @@ string | array<int|string, QueryValue>
 
 Keys are the decoded parameter names, in order of appearance. `a[]=1&a[]=2` yields `['a' => ['1', '2']]`; `a[b]=1` yields `['a' => ['b' => '1']]`. A parameter without `=` has the value `''`. Nesting throws FormatException at the input limit.
 
-Repeated keys without [] are overwriting the previous values: only the last is kept. This means the round trip is not possible. `a=1&a[]=2` is an error
+Repeated keys without [] are overwriting the previous values: only the last is kept. This means the round trip is not possible. `a=1&a[]=2` is an error (`qs.mixed_value_types`).
 
 For build, it uses the RFC 3986 with %20 for spaces, or RFC 1738 with a `+` for space, with constructor configuration.
 
@@ -462,9 +464,9 @@ array{
 
 `build()` uses `value` and `unit`; when only `bytes` is given, it emits the largest unit that divides it exactly. `bytes` conflicting with `value` and `unit` throws `BuildException`.
 
-Negative numbers are supported. `0x`/`0o`/`0b` prefixes are rejected, and that overflow beyond PHP_INT_MAX throws.
+Negative numbers are supported. `0x`/`0o`/`0b` prefixes are rejected, and overflow beyond `PHP_INT_MAX` throws.
 
-Trailing garbage, such as `12Mx` throws FormatException.
+Trailing garbage, such as `12Mx`, throws `FormatException`.
 
 #### `Format\Serialize`
 
@@ -501,6 +503,8 @@ array{
     modifiers: string,     // e.g. 'iu', in order of appearance
 }
 ```
+
+With `PcreFlag::BodyOnly`, the input is the body only: `pattern` holds it, `delimiter` and `modifiers` are `''`. `build()` then returns the body unchanged.
 
 ### Phase 2
 
@@ -582,14 +586,7 @@ Rules:
 - **phar split**: `archive` ends at the first path segment containing `.phar`. Archives whose name has no `.phar` (aliases) can't be split, and are documented as a known limitation.
 - **`data:` payload**: `data` is the payload as written (still base64 when `base64` is true); decoding is left to the caller.
 
-Validation configuration (constructor), because `php://filter` chains and `phar://` are common attack vectors (file inclusion turned into code execution, deserialization of phar metadata):
-
-| Directive          | Default                                   |
-| ------------------ | ----------------------------------------- |
-| allowed wrappers   | `file` only (plain paths and `file://`)   |
-| allowed filters    | none; upper bound is `stream_get_filters()` |
-| max filter chain   | 5 filters                                 |
-| max nesting depth  | 3 wrappers                                |
+Validation is configured with the `StreamUri` flags and options of section 3.2 (allowed wrappers, allowed filters, filter chain length, nesting depth). The strict defaults matter here: `php://filter` chains and `phar://` are common attack vectors (file inclusion turned into code execution, deserialization of phar metadata).
 
 ### Formats without a parsed shape
 
@@ -603,7 +600,8 @@ This is the list for phase 1. More later.
 src/
   Exception/FormatException.php // extends UnexpectedValueException
   Exception/BuildException.php  // extends InvalidArgumentException
-  Exception/VitalsException.php // interface for both exceptions
+  Exception/ConfigurationException.php // extends LogicException
+  Exception/VitalsException.php // interface for all exceptions
   Builder.php  Parser.php  Validator.php Violation.php ViolationCode.php Flags.php
   Flag/        UrlFlag.php IniFlag.php QueryStringFlag.php ByteSizeFlag.php SerializeFlag.php PcreFlag.php
   Option/      MaxDepth.php MaxLength.php MaxItems.php AllowedSchemes.php AllowedClasses.php
