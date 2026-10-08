@@ -24,16 +24,19 @@ Every format is a class implementing one or more of three contracts:
 
 ```php
 interface Builder {
+    public function __construct(Flags ...$flags); 
     /** @param array<string|int, mixed> $parts structured representation */
     public function build(array $parts): string;
 }
 
 interface Parser {
+    public function __construct(Flags ...$flags); 
     /** @return array<string|int, mixed> structured representation */
     public function parse(string $input): array;
 }
 
 interface Validator {
+    public function __construct(Flags ...$flags); 
     public function validate(string $input): bool;
     public function check(string $input): ?Violation;
 }
@@ -53,11 +56,11 @@ Conventions:
 - **Structured representation is an array**, not a format-specific object. This allows round-trip pipelines (`parse(build(parse($x))) == parse($x)`).
 - **Strictness is explicit**: every class takes a `Flags` enum values in its constructor; default is the strictest sane mode.
 - **Immutable objects**: created validation and format objects are immutable.
-- **Input Limits**: set maximum input limits by default, lifted by explicit configuration. Default at 10.
+- **Input Limits**: set maximum input limits by default, lifted by explicit configuration. Default: nesting depth: 10; Input length: 1Mb; items (parameter, array entries): max_input_vars or 1000 is not available.
 - **Encoding**: encoding is UTF-8, except for binary payloads. 
 - **Errors**: `parse()` throws `Vitals\Exception\FormatException` on malformed input and never returns partial arrays silently; `validate()` never throws on malformed input; `build()` throws `Vitals\Exception\BuildException` on impossible representations, such as URL port > 65535.
 - **Delegation over duplication**: when a native function exists and behaves correctly, the class wraps it (e.g. JSON trio) and only adds the missing piece.
-- **Round-trip guarantee**: `parse(build(parse($s)))` must produce a semantically equal parsed string; property-test this in CI. `build(parse($s)) == $s` byte-equal where the format is canonical, semantic-equality otherwise. The impossible round trips should be documented, and possible round trips should be constructed if possible.  
+- **Round-trip guarantee**: `parse(build(parse($s)))` must produce an equal parsed string; property-test this in CI. `build(parse($s)) == $s` byte-equal where the format is canonical, semantic-equality otherwise. The impossible round trips should be documented, and possible round trips should be constructed if possible.  
 - **Configuration**: when needed, directives are passed at the constructor call. They should get a default value as much as possible. 
 - **Warnings**: native PHP warnings are caught with a scoped error handler, and turned into exceptions. No usage of `@`. validate() and check() turn those exceptions into a false result or a Violation.
 - **Missing ext-intl**: throw an exception, that is not supported.
@@ -271,9 +274,9 @@ Rules:
 
 | Class                 | Wraps / implements                                                      | Notes                                                                                                                           |
 | --------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `Format\Url`          | parse: `parse_url()` (fixed for partial failures); build + validate new | RFC 3986 validation by default incl. port range, IDN via `ext-intl` when available (or throw exception). Using constructor to choose WhatWG. On older versions, RFC 3986 and Whatwg throw exceptions.  Write RFC 3986 parsing in pure PHP for PHP 8.2 to 8.4 versions.                                       |
+| `Format\Url`          | parse: `parse_url()` (fixed for partial failures); build + validate new | RFC 3986 validation by default incl. port range, IDN via `ext-intl` when available (or throw exception). Using constructor to choose WhatWG. On older versions, Whatwg throw exceptions.  Write RFC 3986 parsing in pure PHP for PHP 8.2 to 8.4 versions.                                       |
 | `Format\Ini`          | build own parser.                   | `ini_emit()`-equivalent, section-aware, with configuration for build(), to configure the form of true, null and key[] writing (one configuration for each type)                                                                                  |
-| `Format\QueryString`  | `http_build_query()` / Rebuild `parse_str()` to validate                         | normalizes `[]` array keys.                                                                                                       |
+| `Format\QueryString`  | `http_build_query()` / Rebuild `parse_str()` to validate                         | Build produces fully indexed `a[0]=` array keys, like `http_build_query()`.                                                                                                       |
 | `Format\ByteSize`     | `ini_parse_quantity()`                                | `128M` <-> int bytes. Multiplier is 1024.                                                                                                            |
 | `Format\Serialize`    | `serialize()`; new `validate()`                                         | unserialize() is never called on untrusted input, set nesting-depth and length limits. References are not supported. NAN does not support the round trip test.    |
 | `Format\Pattern\Pcre` | new validate (compile without match), No AST.                       | `preg_match($p, '')` under a scoped error handler  |
@@ -288,7 +291,7 @@ Rules:
 | `Format\DateIntervalSpec` | ISO-8601 duration `P1Y2M...` build/parse/validate (constructor wraps)                              |
 | `Format\SprintfSpec`      | validate conversion specifiers;                      |
 | `Format\Numeric`          | numeric-string lint (PHP 8 rules, leading and trailing whitespace, `NAN`/`INF`)                                 |
-| `Format\Locale`           | wraps intl `Locale::composeLocale`/`parseLocale` when available; use ICU locale |
+| `Format\Locale`           | wraps intl `Locale::composeLocale`/`parseLocale`; use ICU locale. Throws exception when not available |
 
 
 ### Phase 3 — encodings & markup
@@ -299,7 +302,7 @@ Rules:
 | `Format\Charset`      | name validation against `mb_list_encodings()`/iconv (configuration, default to mb_string)                   |
 | `Format\LdapDn`       | build/parse with full `\,+"><;` escaping. RFC 4514, including a leading #, leading and trailing spaces, and \XX hex escapes. |
 | `Format\StreamUri`    | build/parse/validate PHP stream wrapper URIs: `php://*`, `data:`, `compress.zlib://`, `compress.bzip2://`, `zip://`, `phar://`, `glob://`. URL-shaped wrappers are delegated to `Format\Url`. Validation allowlists wrappers and filters (security). `php://*` and `data:` first; archive wrappers may follow in a later release |
-| `Format\Glob`         | glob pattern builder (escapes meta chars, depending on platform). Omit GLOB_BRACE option. n Windows, `build()` throws BuildException when a literal segment contains `*`, `?` or `[`, because Windows has no escape character.    |
+| `Format\Glob`         | glob pattern builder (escapes meta chars, depending on platform). Omit GLOB_BRACE option. On Windows, `build()` throws BuildException when a literal segment contains `*`, `?` or `[`, because Windows has no escape character.    |
 
 
 ## 5. Parsed data shapes
@@ -359,7 +362,7 @@ string | array<int|string, QueryValue>
 
 Keys are the decoded parameter names, in order of appearance. `a[]=1&a[]=2` yields `['a' => ['1', '2']]`; `a[b]=1` yields `['a' => ['b' => '1']]`. A parameter without `=` has the value `''`. Nesting throws FormatException at the input limit.
 
-Repeated keys without [] are overwriting the previous values: only the last is kept. This means the round trip is not possible.
+Repeated keys without [] are overwriting the previous values: only the last is kept. This means the round trip is not possible. `a=1&a[]=2` is an error
 
 For build, it uses the RFC 3986 with %20 for spaces, or RFC 1738 with a `+` for space, with constructor configuration.
 
@@ -527,8 +530,6 @@ tests/
   Unit/  Property/   (round-trip property tests)
   fixtures/          (corpus of valid/invalid samples per format)
 ```
-
-
 
 ## 7. Testing strategy
 
