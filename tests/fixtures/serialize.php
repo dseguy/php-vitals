@@ -1,0 +1,36 @@
+<?php
+
+// Corpus for Format\Serialize. Valid samples are built with serialize() in the tests.
+return [
+    'invalid' => [
+        '' => 'common.empty_input',
+        'i:1' => 'common.unexpected_end',
+        'a:1:{i:0;' => 'common.unexpected_end',
+        's:5:"ab";' => 'common.unexpected_end',
+        'i:1;i:2;' => 'common.trailing_data',
+        'x:1;' => 'serialize.unknown_type',
+        'S:1:"a";' => 'serialize.unknown_type',
+        'i;' => 'serialize.missing_terminator',
+        's:2:"ab"' => 'common.unexpected_end',
+        's:2:"ab"x' => 'serialize.missing_terminator',
+        's:3:"ab";' => 'serialize.length_mismatch',
+        'a:2:{i:0;i:1;}' => 'serialize.count_mismatch',
+        'a:1:{i:0;i:1;i:1;i:2;}' => 'serialize.count_mismatch',
+        'i:01;' => 'serialize.invalid_int',
+        'i:+1;' => 'serialize.invalid_int',
+        'i:99999999999999999999;' => 'serialize.invalid_int',
+        'd:1.2.3;' => 'serialize.invalid_float',
+        'd:inf;' => 'serialize.invalid_float',
+        'b:2;' => 'serialize.invalid_bool',
+        'a:1:{d:1.5;i:1;}' => 'serialize.invalid_key',
+        'a:1:{N;i:1;}' => 'serialize.invalid_key',
+        'O:1:"1":0:{}' => 'serialize.invalid_class_name',
+        'O:3:"a-b":0:{}' => 'serialize.invalid_class_name',
+        "O:8:\"stdClass\":1:{s:2:\"\0a\";i:1;}" => 'serialize.invalid_property_name',
+        "O:8:\"stdClass\":1:{s:4:\"\0\0ab\";i:1;}" => 'serialize.invalid_property_name',
+        'E:2:"AB";' => 'serialize.invalid_enum',
+        'E:2:"A:";' => 'serialize.invalid_enum',
+        'r:1;' => 'serialize.reference_unsupported',
+        'a:2:{i:0;a:0:{}i:1;R:2;}' => 'serialize.reference_unsupported',
+    ],
+];
